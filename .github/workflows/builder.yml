@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:  # تشغيل يدوي
+    inputs:
+      clean_build:
+        description: 'تنظيف البناء السابق؟'
+        required: false
+        default: 'false'
 
 jobs:
   build:
@@ -42,23 +47,77 @@ jobs:
           wget \
           zlib1g-dev \
           openjdk-11-jdk \
-          zip
+          zip \
+          libncurses5-dev \
+          libsqlite3-dev
         
     - name: Install Python dependencies
       run: |
-        pip install --upgrade pip
+        python -m pip install --upgrade pip
         pip install cython==0.29.33
         pip install buildozer
         
-    - name: Initialize Buildozer
+    - name: Check for existing buildozer.spec
       run: |
-        buildozer init
+        if [ -f "buildozer.spec" ]; then
+          echo "✅ buildozer.spec موجود - تخطي buildozer init"
+          echo "محتويات الملف:"
+          head -20 buildozer.spec
+        else
+          echo "❌ buildozer.spec غير موجود - جاري الإنشاء..."
+          buildozer init
+        fi
         
-    - name: Build APK
+    - name: Update buildozer.spec if needed
       run: |
-        buildozer -v android debug
-        # للبناء بإصدار التوقيع:
-        # buildozer android release
+        if [ -f "buildozer.spec" ]; then
+          echo "تحديث buildozer.spec..."
+          # التأكد من الإعدادات الصحيحة
+          sed -i "s/^source.main = .*/source.main = calculator.py/" buildozer.spec || echo "لم يتم تحديث main"
+          sed -i "s/^requirements = .*/requirements = python3,kivy/" buildozer.spec || echo "لم يتم تحديث requirements"
+          sed -i "s/^android.minapi = .*/android.minapi = 21/" buildozer.spec || echo "لم يتم تحديث minapi"
+          sed -i "s/^android.sdk = .*/android.sdk = 28/" buildozer.spec || echo "لم يتم تحديث sdk"
+        fi
+        
+    - name: Clean previous build (optional)
+      if: github.event.inputs.clean_build == 'true'
+      run: |
+        echo "تنظيف البناء السابق..."
+        rm -rf .buildozer bin || true
+        
+    - name: Validate buildozer configuration
+      run: |
+        echo "التحقق من الإعدادات..."
+        if [ -f "buildozer.spec" ]; then
+          echo "✅ buildozer.spec صالح"
+        else
+          echo "❌ buildozer.spec غير موجود"
+          exit 1
+        fi
+        
+        if [ -f "calculator.py" ]; then
+          echo "✅ calculator.py موجود"
+        else
+          echo "❌ calculator.py غير موجود"
+          exit 1
+        fi
+        
+    - name: Build APK (debug version)
+      run: |
+        echo "بدء بناء APK..."
+        # استخدام buildozer مع إخراج مفصّل
+        buildozer android debug 2>&1 | tee build.log
+        
+        # التحقق من وجود APK
+        if ls bin/*.apk 1> /dev/null 2>&1; then
+          echo "✅ APK تم بناؤه بنجاح!"
+          ls -la bin/*.apk
+        else
+          echo "❌ فشل بناء APK"
+          echo "آخر 50 سطراً من السجل:"
+          tail -50 .buildozer/android/platform/build-armeabi-v7a/docker.log || true
+          exit 1
+        fi
         
     - name: Upload APK artifact
       uses: actions/upload-artifact@v4
@@ -68,9 +127,11 @@ jobs:
         retention-days: 7
         
     - name: Upload build logs
-      if: failure()
+      if: always()
       uses: actions/upload-artifact@v4
       with:
         name: build-logs
-        path: .buildozer/
+        path: |
+          build.log
+          .buildozer/
         retention-days: 7
